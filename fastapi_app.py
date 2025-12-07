@@ -5,10 +5,14 @@ import chromadb
 from chromadb.config import Settings
 import google.generativeai as genai
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,StreamingResponse
 from pydantic import BaseModel
 from typing import List
 import json
+import re
+from fastapi.middleware.cors import CORSMiddleware
+
+
 
 with open("api.json","r") as f:
     api=json.load(f)
@@ -86,6 +90,20 @@ class docExtractor:
             self.collection.delete(ids=ids_to_delete)
         return ids_to_delete
 
+def check_with_gemini(prompt):
+    model = genai.GenerativeModel("models/gemini-2.5-flash")
+    response = model.generate_content(prompt)
+    response = response.text
+    match = re.search(r'\$\$(.*?)\$\$', response, re.DOTALL) 
+    if match: 
+        print("***match found**", response) 
+        response = match.group(1)
+    match = re.search(r'json\s*(.*)', response, re.DOTALL) 
+    if match: 
+        response = match.group(1) # Remove any trailing triple backticks if they exist 
+    response = re.sub(r'```', '', response).strip()
+    return response
+
 
 def answer_with_gemini(query, retrieved_docs):
     context = "\n\n".join(retrieved_docs.values())
@@ -105,19 +123,33 @@ Answer:
 - Use bullet points if multiple points exist.
 - I want response in markdown
 """
-    model = genai.GenerativeModel("models/gemini-2.0-flash")
-    response = model.generate_content(prompt)
-    return response.text
-
-
+    model = genai.GenerativeModel("models/gemini-2.5-flash")
+    # response = model.generate_content(prompt)
+    # return response.text
+    answer =""
+    response = model.generate_content(prompt, stream=True)
+    for chunk in response:
+        yield chunk.text
+        answer += chunk.text
+        print(chunk.text, end="")
+    print("\n\n#############",{"question": query, "answer": answer},"#######\n\n")
 
 app = FastAPI()
 os.makedirs("./uploads", exist_ok=True)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class QueryRequest(BaseModel):
     docs: List[str]
     query: str
+    message_history:str
 
 class DeleteRequest(BaseModel):
     docs: List[str]
@@ -128,7 +160,7 @@ class DeleteRequest(BaseModel):
 @app.post("/upload_file")
 async def upload_file(file: UploadFile = File(...)):
     doc_extractor = docExtractor(collection_name="my_doc_2")
-
+    
     file_location = f"./uploads/{file.filename}"
     with open(file_location, "wb") as f:
         f.write(await file.read())
@@ -136,6 +168,10 @@ async def upload_file(file: UploadFile = File(...)):
     pdf_pages = doc_extractor.pdf_extractor(file_location)
     embedded_pages = doc_extractor.create_embeddings(pdf_pages)
     doc_extractor.store_to_chromadb(embedded_pages, doc_name=file.filename)
+    try:
+        os.remove(file_location)
+    except Exception as e:
+        print("error",e)
 
     return {"message": f"doc {file.filename} uploaded successfully!"}
 
@@ -158,8 +194,44 @@ async def delete_docs(input_data: DeleteRequest):
 
 @app.post("/query")
 async def query_doc(input_data: QueryRequest):
+    prompt = f"""You will receive:
+- A conversation history inside <message_history>
+- A current user query inside <user_question>
+
+Your task:
+1. Determine whether the current user question depends on the previous conversation.
+
+<message_history>
+{input_data.message_history} 
+</message_history>
+<user_question>
+{input_data.query}
+</user_question>
+2. If it depends:
+   - Summarize only the relevant parts of the message history.
+   - Rephrase the user's current question into a complete standalone question.
+   - Return your answer ONLY.
+
+
+3. If it does NOT depend on the conversation history:
+   Return exactly:
+None
+
+Rules:
+- Do NOT add explanation.
+- Do NOT invent missing details.
+- Output must follow the format strictly.
+- just return the rephrased output or "none" in in between double dollar without any explanation.
+return the output in between double dollar like $$...$$.
+"""
+    question = input_data.query
+    check_question = check_with_gemini(prompt)
+    print(check_question)
+    if check_question.lower() !="none":
+        question = check_question
+
     doc_extractor = docExtractor(collection_name="my_doc_2")
 
-    results = doc_extractor.retrieve(input_data.query, file_names=input_data.docs)
-    answer = answer_with_gemini(input_data.query, results)
-    return answer
+    results = doc_extractor.retrieve(question, file_names=input_data.docs)
+    # return answer_with_gemini(input_data.query, results)
+    return StreamingResponse(answer_with_gemini(question, results), media_type="text/plain")
