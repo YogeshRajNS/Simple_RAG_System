@@ -1,5 +1,5 @@
 # Simple_RAG_System
-steps to run backend(Fastapi)
+steps to run backend(fast api)
 
 step 1:
 python -m venv venv
@@ -14,18 +14,21 @@ step 4:
 uvicorn fastapi_app:app --reload --port 8000
 
 
-For frontend(React):
-steps to run frontend 
+Steps to run frontend(react)
 
 step 1:
-cd doc-client
+Open new terminal
 
 step 2:
+cd doc-client
+
+step 3:
 install:
         npm install @mui/material @emotion/react @emotion/styled
         npm install react-dropzone react-icons
         npm install axios react-toastify
         npm install @mui/icons-material
 
-step 3:
+step 4:
 npm start
+
